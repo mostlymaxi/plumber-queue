@@ -1,6 +1,6 @@
-use std::io::{Write, BufReader, BufRead, BufWriter, self};
-use std::net::{TcpStream, TcpListener, SocketAddr, IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{self};
+use std::net::{TcpListener, SocketAddr, IpAddr, Ipv4Addr};
+use std::sync::atomic::AtomicBool;
 use std::{thread, sync::Arc, time::Duration};
 
 use clients::{GeneralClient, Client, ProducerClient, ConsumerClient};
@@ -58,13 +58,13 @@ impl QueueServer {
 
     #[allow(dead_code)]
     pub fn with_producer_address(mut self, addr: &SocketAddr) -> Self {
-        self.addr_producer = addr.clone();
+        self.addr_producer = *addr;
         self
     }
 
     #[allow(dead_code)]
     pub fn with_consumer_address(mut self, addr: &SocketAddr) -> Self {
-        self.addr_consumer = addr.clone();
+        self.addr_consumer = *addr;
         self
     }
 
@@ -102,8 +102,8 @@ impl QueueServer {
     }
 
     fn run(self) {
-        let p_listener = TcpListener::bind(&self.addr_producer).unwrap();
-        let c_listener = TcpListener::bind(&self.addr_consumer).unwrap();
+        let p_listener = TcpListener::bind(self.addr_producer).unwrap();
+        let c_listener = TcpListener::bind(self.addr_consumer).unwrap();
         let heartbeat = Duration::from_millis(self.heartbeat);
 
         let ringbuf_clone = self.ringbuf.clone();
@@ -124,8 +124,8 @@ impl QueueServer {
             running_clone
         ));
 
-        let _ = c_thread.join().unwrap();
-        let _ = p_thread.join().unwrap();
+        c_thread.join().unwrap();
+        p_thread.join().unwrap();
 
     }
 

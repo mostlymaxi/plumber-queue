@@ -100,8 +100,8 @@ impl Clone for ConsumerClient {
         Self {
             ringbuf: self.ringbuf.clone(),
             stream: self.stream.try_clone().unwrap(),
-            heartbeat: self.heartbeat.clone(),
-            addr: self.addr.clone(),
+            heartbeat: self.heartbeat,
+            addr: self.addr,
             running: self.running.clone() }
     }
 }
@@ -157,7 +157,7 @@ impl Client for ConsumerClient {
         let a = alive.clone();
 
         let stream_clone = self.stream.try_clone().unwrap();
-        let heartbeat = self.heartbeat.clone();
+        let heartbeat = self.heartbeat;
         thread::spawn(move || stream_clone.keepalive(heartbeat, a));
 
         let mut stream = BufWriter::new(&self.stream);
