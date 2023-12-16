@@ -14,6 +14,16 @@ pub struct QueueServer {
     heartbeat: u64
 }
 
+impl Drop for QueueServer {
+    fn drop(&mut self) {
+        while let Some(s) = self.ringbuf.pop() {
+            eprintln!("{s}");
+        }
+    }
+}
+
+// maybe send copy of data down channel that gets written to disk????
+// idk
 impl QueueServer {
     pub const DEFAULT_QUEUE_SIZE: usize = 1_000_000;
     pub const DEFAULT_PRODUCER_PORT: u16 = 8084;
