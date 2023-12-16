@@ -1,4 +1,4 @@
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, net::{TcpStream, SocketAddr}, time::Duration, io::{BufReader, self, BufWriter, BufRead, Write}, thread};
+use std::{sync::{Arc, atomic::{AtomicBool, Ordering, AtomicUsize}}, net::{TcpStream, SocketAddr}, time::Duration, io::{BufReader, self, BufWriter, BufRead, Write}, thread};
 
 use crossbeam::{queue::ArrayQueue, channel::Sender};
 
@@ -9,6 +9,7 @@ pub trait Client: Sized {
 pub struct GeneralClient {
     ringbuf: Arc<ArrayQueue<String>>,
     sync_sender: Sender<String>,
+    sync_consumer: Arc<AtomicUsize>,
     stream: TcpStream,
     heartbeat: Duration,
     addr: SocketAddr,
@@ -18,6 +19,7 @@ pub struct GeneralClient {
 impl GeneralClient {
     pub fn new(ringbuf: Arc<ArrayQueue<String>>,
                sync_sender: Sender<String>,
+               sync_consumer: Arc<AtomicUsize>,
                stream: TcpStream,
                heartbeat: Duration,
                addr: SocketAddr,
@@ -25,6 +27,7 @@ impl GeneralClient {
         Self {
             ringbuf,
             sync_sender,
+            sync_consumer,
             stream,
             heartbeat,
             addr,
@@ -38,6 +41,7 @@ impl Client for GeneralClient {}
 pub struct ProducerClient {
     ringbuf: Arc<ArrayQueue<String>>,
     sync_sender: Sender<String>,
+    _sync_consumer: Arc<AtomicUsize>,
     stream: TcpStream,
     _heartbeat: Duration,
     addr: SocketAddr,
@@ -49,6 +53,7 @@ impl From<GeneralClient> for ProducerClient {
         Self {
             ringbuf: c.ringbuf,
             sync_sender: c.sync_sender,
+            _sync_consumer: c.sync_consumer,
             stream: c.stream,
             _heartbeat: c.heartbeat,
             addr: c.addr,
@@ -97,6 +102,7 @@ impl Client for ProducerClient {
 pub struct ConsumerClient {
     ringbuf: Arc<ArrayQueue<String>>,
     stream: TcpStream,
+    sync_consumer: Arc<AtomicUsize>,
     heartbeat: Duration,
     addr: SocketAddr,
     running: Arc<AtomicBool>,
@@ -107,6 +113,7 @@ impl Clone for ConsumerClient {
         Self {
             ringbuf: self.ringbuf.clone(),
             stream: self.stream.try_clone().unwrap(),
+            sync_consumer: self.sync_consumer.clone(),
             heartbeat: self.heartbeat,
             addr: self.addr,
             running: self.running.clone() }
@@ -118,6 +125,7 @@ impl From<GeneralClient> for ConsumerClient {
         Self {
             ringbuf: c.ringbuf,
             stream: c.stream,
+            sync_consumer: c.sync_consumer,
             heartbeat: c.heartbeat,
             addr: c.addr,
             running: c.running
@@ -189,6 +197,7 @@ impl Client for ConsumerClient {
             log::trace!("{:#?}", line);
             stream.write_all(line.as_bytes()).unwrap();
             stream.write_all(&[b'\n']).unwrap();
+            self.sync_consumer.fetch_add(1, Ordering::Relaxed);
         }
 
         log::info!("({}) closing consumer client", self.addr)

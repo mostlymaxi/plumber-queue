@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::net::{TcpListener, SocketAddr, IpAddr, Ipv4Addr, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering, AtomicUsize};
 use std::{thread, sync::Arc, time::Duration};
 
 use crate::handlers::{GeneralClient, Client, ProducerClient, ConsumerClient};
@@ -27,6 +27,11 @@ impl Drop for QueueServer {
         // }
         // log::info!("done!");
     }
+}
+
+enum CurrentPage {
+    A,
+    B
 }
 
 // maybe send copy of data down channel that gets written to disk????
@@ -136,6 +141,7 @@ impl QueueServer {
         heartbeat: Duration,
         ringbuf: Arc<ArrayQueue<String>>,
         sync_sender: Sender<String>,
+        sync_consumer: Arc<AtomicUsize>,
         running: Arc<AtomicBool>) where C: From<GeneralClient> + Client + Send + 'static {
         // this is necessary for timeouts and things
         listener.set_nonblocking(false).unwrap();
@@ -148,10 +154,12 @@ impl QueueServer {
                     let ringbuf_clone = ringbuf.clone();
                     let running_clone = running.clone();
                     let sync_sender_clone = sync_sender.clone();
+                    let sync_consumer_clone = sync_consumer.clone();
 
                     let client = GeneralClient::new(
                         ringbuf_clone,
                         sync_sender_clone,
+                        sync_consumer_clone,
                         stream,
                         heartbeat,
                         addr,
@@ -172,16 +180,42 @@ impl QueueServer {
         }
     }
 
-    fn disk_syncer(sync_receiver: Receiver<String>) {
-        let db = sled::open("test_disk_syncer").unwrap();
+
+    fn disk_syncer(queue_size: usize, sync_receiver: Receiver<String>, sync_consumer: Arc<AtomicUsize>) {
+        let mut current_page = CurrentPage::A;
+        let f = fs::File::create("test_sync_v2_A").unwrap();
+        let mut f = BufWriter::new(f);
         let mut i: usize = 0;
-        const MAX_SIZE: usize = 1_000;
 
         for msg in sync_receiver {
-            db.insert(b"last", &i.to_be_bytes()).unwrap();
-            db.insert(&i.to_be_bytes(), msg.as_bytes()).unwrap();
-            i = (i + 1) % MAX_SIZE;
+            if i == queue_size {
+                f.flush().unwrap();
+                f = match current_page {
+                    CurrentPage::A => {
+                        current_page = CurrentPage::B;
+                        let tmp = fs::File::create("test_sync_v2_B").unwrap();
+                        BufWriter::new(tmp)
+                    },
+                    CurrentPage::B => {
+                        current_page = CurrentPage::A;
+                        let tmp = fs::File::create("test_sync_v2_A").unwrap();
+                        BufWriter::new(tmp)
+                    },
+                };
+                i = 0;
+            }
+            f.write_all(msg.as_bytes()).unwrap();
+            f.write_all(&[b'\n']).unwrap();
+            f.write_all(sync_consumer
+                .load(Ordering::Relaxed)
+                .to_string()
+                .as_bytes()
+            ).unwrap();
+            f.write_all(&[b'\n']).unwrap();
+            i += 1;
         }
+
+        f.flush().unwrap();
     }
 
     pub fn run(self) {
@@ -200,18 +234,21 @@ impl QueueServer {
         let c_listener = TcpListener::bind(self.addr_consumer).unwrap();
         let heartbeat = Duration::from_millis(self.heartbeat);
 
-        let (sync_sender, sync_receiver) = crossbeam::channel::unbounded();
+        let (sync_sender, sync_receiver) = crossbeam::channel::bounded(1000);
+        let sync_consumer = Arc::new(AtomicUsize::new(0));
         //let (sync_sender, sync_receiver) = crossbeam::channel::bounded(self.ringbuf.capacity());
 
         log::debug!("spawning producer handler");
         let ringbuf_clone = self.ringbuf.clone();
         let running_clone = self.running.clone();
         let sync_sender_clone = sync_sender.clone();
+        let sync_consumer_clone = sync_consumer.clone();
         let p_thread = thread::spawn(move || QueueServer::client_handler::<ProducerClient>(
             p_listener,
             heartbeat,
             ringbuf_clone,
             sync_sender_clone,
+            sync_consumer_clone,
             running_clone
         ));
 
@@ -219,15 +256,20 @@ impl QueueServer {
         let ringbuf_clone = self.ringbuf.clone();
         let running_clone = self.running.clone();
         let sync_sender_clone = sync_sender.clone();
+        let sync_consumer_clone = sync_consumer.clone();
         let c_thread = thread::spawn(move || QueueServer::client_handler::<ConsumerClient>(
             c_listener,
             heartbeat,
             ringbuf_clone,
             sync_sender_clone,
+            sync_consumer_clone,
             running_clone
         ));
 
-        let s_thread = thread::spawn(move || Self::disk_syncer(sync_receiver));
+        let queue_size = self.ringbuf.capacity();
+        let s_thread = thread::spawn(move || Self::disk_syncer(
+            queue_size, sync_receiver, sync_consumer)
+        );
         drop(sync_sender);
 
         log::info!("ready to accept connections!");
