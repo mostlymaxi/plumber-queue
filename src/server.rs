@@ -1,6 +1,7 @@
-use std::io::{self};
-use std::net::{TcpListener, SocketAddr, IpAddr, Ipv4Addr};
-use std::sync::atomic::AtomicBool;
+use std::fs;
+use std::io::{self, BufWriter, Write};
+use std::net::{TcpListener, SocketAddr, IpAddr, Ipv4Addr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{thread, sync::Arc, time::Duration};
 
 use crate::handlers::{GeneralClient, Client, ProducerClient, ConsumerClient};
@@ -16,9 +17,14 @@ pub struct QueueServer {
 
 impl Drop for QueueServer {
     fn drop(&mut self) {
+        log::info!("writing queue to disk...");
+        let f = fs::File::create("test_backup").unwrap();
+        let mut f = BufWriter::new(f);
         while let Some(s) = self.ringbuf.pop() {
-            eprintln!("{s}");
+            f.write_all(s.as_bytes()).unwrap();
+            f.write_all(&[b'\n']).unwrap();
         }
+        log::info!("done!");
     }
 }
 
@@ -130,9 +136,11 @@ impl QueueServer {
         // this is necessary for timeouts and things
         listener.set_nonblocking(false).unwrap();
 
-        loop {
+        while running.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, addr)) => {
+                    if !running.load(Ordering::Relaxed) { break; }
+
                     let ringbuf_clone = ringbuf.clone();
                     let r = running.clone();
 
@@ -159,6 +167,15 @@ impl QueueServer {
 
     pub fn run(self) {
         log::debug!("starting queue server...");
+
+        let running_clone = self.running.clone();
+        ctrlc::set_handler(move || {
+            running_clone.store(false, Ordering::Relaxed);
+            thread::sleep(Duration::from_millis(100));
+
+            let _ = TcpStream::connect_timeout(&self.addr_consumer, Duration::from_secs(2)).unwrap();
+            let _ = TcpStream::connect_timeout(&self.addr_producer, Duration::from_secs(2)).unwrap();
+        }).unwrap();
 
         let p_listener = TcpListener::bind(self.addr_producer).unwrap();
         let c_listener = TcpListener::bind(self.addr_consumer).unwrap();
