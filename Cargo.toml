@@ -11,3 +11,4 @@ crossbeam = { version = "0.8.2", features = ["crossbeam-queue"] }
 ctrlc = { version = "3.4.1", features = ["termination"] }
 env_logger = "0.10.1"
 log = "0.4.20"
+sled = "0.34.7"

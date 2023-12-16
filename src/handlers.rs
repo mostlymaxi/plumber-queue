@@ -1,6 +1,6 @@
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, net::{TcpStream, SocketAddr}, time::Duration, io::{BufReader, self, BufWriter, BufRead, Write}, thread};
 
-use crossbeam::queue::ArrayQueue;
+use crossbeam::{queue::ArrayQueue, channel::Sender};
 
 pub trait Client: Sized {
     fn run(self) {}
@@ -8,6 +8,7 @@ pub trait Client: Sized {
 
 pub struct GeneralClient {
     ringbuf: Arc<ArrayQueue<String>>,
+    sync_sender: Sender<String>,
     stream: TcpStream,
     heartbeat: Duration,
     addr: SocketAddr,
@@ -16,12 +17,14 @@ pub struct GeneralClient {
 
 impl GeneralClient {
     pub fn new(ringbuf: Arc<ArrayQueue<String>>,
-           stream: TcpStream,
-           heartbeat: Duration,
-           addr: SocketAddr,
-           running: Arc<AtomicBool>,) -> Self {
+               sync_sender: Sender<String>,
+               stream: TcpStream,
+               heartbeat: Duration,
+               addr: SocketAddr,
+               running: Arc<AtomicBool>,) -> Self {
         Self {
             ringbuf,
+            sync_sender,
             stream,
             heartbeat,
             addr,
@@ -34,6 +37,7 @@ impl Client for GeneralClient {}
 
 pub struct ProducerClient {
     ringbuf: Arc<ArrayQueue<String>>,
+    sync_sender: Sender<String>,
     stream: TcpStream,
     _heartbeat: Duration,
     addr: SocketAddr,
@@ -44,6 +48,7 @@ impl From<GeneralClient> for ProducerClient {
     fn from(c: GeneralClient) -> Self {
         Self {
             ringbuf: c.ringbuf,
+            sync_sender: c.sync_sender,
             stream: c.stream,
             _heartbeat: c.heartbeat,
             addr: c.addr,
@@ -80,7 +85,9 @@ impl Client for ProducerClient {
             };
 
             log::trace!("({}) {:#?}", self.addr, line);
-            self.ringbuf.force_push(line);
+            self.ringbuf.force_push(line.clone());
+            self.sync_sender.send(line).unwrap();
+
         }
 
         log::info!("({}) closing producer client", self.addr)
