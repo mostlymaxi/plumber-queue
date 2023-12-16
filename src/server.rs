@@ -8,25 +8,41 @@ use crate::handlers::{GeneralClient, Client, ProducerClient, ConsumerClient};
 use crossbeam::channel::{Sender, Receiver};
 use crossbeam::queue::ArrayQueue;
 
+#[derive(Clone)]
+pub struct QueueMessage {
+    offset: usize,
+    msg: String,
+}
+
+impl QueueMessage {
+    pub fn new(offset: usize, msg: String) -> QueueMessage {
+        QueueMessage {
+            offset,
+            msg,
+        }
+    }
+
+    pub fn get_msg(&self) -> String {
+        self.msg.clone()
+    }
+
+    pub fn get_offset(&self) -> usize {
+        self.offset
+    }
+}
+
+impl ToString for QueueMessage {
+    fn to_string(&self) -> String {
+        format!("[{:X}] {}", self.offset, self.msg)
+    }
+}
+
 pub struct QueueServer {
     addr_producer: SocketAddr,
     addr_consumer: SocketAddr,
-    ringbuf: Arc<ArrayQueue<String>>,
+    ringbuf: Arc<ArrayQueue<QueueMessage>>,
     running: Arc<AtomicBool>,
     heartbeat: u64
-}
-
-impl Drop for QueueServer {
-    fn drop(&mut self) {
-        // log::info!("writing queue to disk...");
-        // let f = fs::File::create("test_backup").unwrap();
-        // let mut f = BufWriter::new(f);
-        // while let Some(s) = self.ringbuf.pop() {
-        //     f.write_all(s.as_bytes()).unwrap();
-        //     f.write_all(&[b'\n']).unwrap();
-        // }
-        // log::info!("done!");
-    }
 }
 
 enum CurrentPage {
@@ -45,7 +61,7 @@ impl QueueServer {
 
     #[allow(dead_code)]
     pub fn new() -> Self {
-        let ringbuf: ArrayQueue<String> = ArrayQueue::new(Self::DEFAULT_QUEUE_SIZE);
+        let ringbuf: ArrayQueue<QueueMessage> = ArrayQueue::new(Self::DEFAULT_QUEUE_SIZE);
         let ringbuf = Arc::new(ringbuf);
         let running = Arc::new(AtomicBool::new(true));
 
@@ -70,7 +86,7 @@ impl QueueServer {
 
     #[allow(dead_code)]
     pub fn new_with_size(n: usize) -> Self {
-        let ringbuf: ArrayQueue<String> = ArrayQueue::new(n);
+        let ringbuf: ArrayQueue<QueueMessage> = ArrayQueue::new(n);
         let ringbuf = Arc::new(ringbuf);
         let running = Arc::new(AtomicBool::new(true));
 
@@ -95,7 +111,7 @@ impl QueueServer {
 
     #[allow(dead_code)]
     pub fn with_size(mut self, n: usize) -> Self {
-        let ringbuf: ArrayQueue<String> = ArrayQueue::new(n);
+        let ringbuf: ArrayQueue<QueueMessage> = ArrayQueue::new(n);
         let ringbuf = Arc::new(ringbuf);
 
         self.ringbuf = ringbuf;
@@ -139,8 +155,8 @@ impl QueueServer {
     fn client_handler<C>(
         listener: TcpListener,
         heartbeat: Duration,
-        ringbuf: Arc<ArrayQueue<String>>,
-        sync_sender: Sender<String>,
+        ringbuf: Arc<ArrayQueue<QueueMessage>>,
+        sync_sender: Sender<QueueMessage>,
         sync_consumer: Arc<AtomicUsize>,
         running: Arc<AtomicBool>) where C: From<GeneralClient> + Client + Send + 'static {
         // this is necessary for timeouts and things
@@ -181,13 +197,13 @@ impl QueueServer {
     }
 
 
-    fn disk_syncer(queue_size: usize, sync_receiver: Receiver<String>, sync_consumer: Arc<AtomicUsize>) {
+    fn disk_syncer(queue_size: usize, sync_receiver: Receiver<QueueMessage>, sync_consumer: Arc<AtomicUsize>) {
         let mut current_page = CurrentPage::A;
         let f = fs::File::create("test_sync_v2_A").unwrap();
         let mut f = BufWriter::new(f);
         let mut i: usize = 0;
 
-        for msg in sync_receiver {
+        for qm in sync_receiver {
             if i == queue_size {
                 f.flush().unwrap();
                 f = match current_page {
@@ -204,7 +220,8 @@ impl QueueServer {
                 };
                 i = 0;
             }
-            f.write_all(msg.as_bytes()).unwrap();
+
+            f.write_all(qm.to_string().as_bytes()).unwrap();
             f.write_all(&[b'\n']).unwrap();
             f.write_all(sync_consumer
                 .load(Ordering::Relaxed)

@@ -2,13 +2,15 @@ use std::{sync::{Arc, atomic::{AtomicBool, Ordering, AtomicUsize}}, net::{TcpStr
 
 use crossbeam::{queue::ArrayQueue, channel::Sender};
 
+use crate::server::QueueMessage;
+
 pub trait Client: Sized {
     fn run(self) {}
 }
 
 pub struct GeneralClient {
-    ringbuf: Arc<ArrayQueue<String>>,
-    sync_sender: Sender<String>,
+    ringbuf: Arc<ArrayQueue<QueueMessage>>,
+    sync_sender: Sender<QueueMessage>,
     sync_consumer: Arc<AtomicUsize>,
     stream: TcpStream,
     heartbeat: Duration,
@@ -17,8 +19,8 @@ pub struct GeneralClient {
 }
 
 impl GeneralClient {
-    pub fn new(ringbuf: Arc<ArrayQueue<String>>,
-               sync_sender: Sender<String>,
+    pub fn new(ringbuf: Arc<ArrayQueue<QueueMessage>>,
+               sync_sender: Sender<QueueMessage>,
                sync_consumer: Arc<AtomicUsize>,
                stream: TcpStream,
                heartbeat: Duration,
@@ -39,8 +41,8 @@ impl GeneralClient {
 impl Client for GeneralClient {}
 
 pub struct ProducerClient {
-    ringbuf: Arc<ArrayQueue<String>>,
-    sync_sender: Sender<String>,
+    ringbuf: Arc<ArrayQueue<QueueMessage>>,
+    sync_sender: Sender<QueueMessage>,
     _sync_consumer: Arc<AtomicUsize>,
     stream: TcpStream,
     _heartbeat: Duration,
@@ -69,6 +71,7 @@ impl Client for ProducerClient {
         self.stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         let stream = BufReader::new(&self.stream);
         let mut stream = stream.lines();
+        let mut offset = 0;
 
         while self.running.load(Ordering::Relaxed) {
             let Some(line) = stream.next() else { break };
@@ -90,9 +93,10 @@ impl Client for ProducerClient {
             };
 
             log::trace!("({}) {:#?}", self.addr, line);
-            self.ringbuf.force_push(line.clone());
-            self.sync_sender.send(line).unwrap();
-
+            let qm = QueueMessage::new(offset, line);
+            self.ringbuf.force_push(qm.clone());
+            self.sync_sender.send(qm).unwrap();
+            offset += 1;
         }
 
         log::info!("({}) closing producer client", self.addr)
@@ -100,7 +104,7 @@ impl Client for ProducerClient {
 }
 
 pub struct ConsumerClient {
-    ringbuf: Arc<ArrayQueue<String>>,
+    ringbuf: Arc<ArrayQueue<QueueMessage>>,
     stream: TcpStream,
     sync_consumer: Arc<AtomicUsize>,
     heartbeat: Duration,
@@ -184,8 +188,8 @@ impl Client for ConsumerClient {
                 break;
             }
 
-            let line = match self.ringbuf.pop() {
-                Some(l) => l,
+            let qm = match self.ringbuf.pop() {
+                Some(qm) => qm,
                 None => {
                     stream.flush().unwrap();
                     log::trace!("({}) waiting for data...", self.addr);
@@ -194,10 +198,12 @@ impl Client for ConsumerClient {
                 }
             };
 
+            let line = qm.get_msg();
             log::trace!("{:#?}", line);
+
             stream.write_all(line.as_bytes()).unwrap();
             stream.write_all(&[b'\n']).unwrap();
-            self.sync_consumer.fetch_add(1, Ordering::Relaxed);
+            self.sync_consumer.store(qm.get_offset(), Ordering::Relaxed);
         }
 
         log::info!("({}) closing consumer client", self.addr)
