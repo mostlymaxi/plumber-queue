@@ -241,7 +241,6 @@ impl QueueServer {
         let running_clone = self.running.clone();
         ctrlc::set_handler(move || {
             running_clone.store(false, Ordering::Relaxed);
-            thread::sleep(Duration::from_millis(100));
 
             let _ = TcpStream::connect_timeout(&self.addr_producer, Duration::from_secs(2));
             let _ = TcpStream::connect_timeout(&self.addr_consumer, Duration::from_secs(2));
