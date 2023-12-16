@@ -54,7 +54,7 @@ impl From<GeneralClient> for ProducerClient {
 
 impl Client for ProducerClient {
     fn run(self) {
-        log::debug!("({}) accepted new producer client", self.addr);
+        log::info!("({}) accepted new producer client", self.addr);
 
         self.stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         let stream = BufReader::new(&self.stream);
@@ -83,7 +83,7 @@ impl Client for ProducerClient {
             self.ringbuf.force_push(line);
         }
 
-        log::debug!("({}) closing producer client", self.addr)
+        log::info!("({}) closing producer client", self.addr)
     }
 }
 
@@ -152,7 +152,7 @@ impl KeepAlive for TcpStream {
 
 impl Client for ConsumerClient {
     fn run(self) {
-        log::debug!("({}) accepted new consumer client", self.addr);
+        log::info!("({}) accepted new consumer client", self.addr);
         let alive = Arc::new(AtomicBool::new(true));
         let a = alive.clone();
 
@@ -184,6 +184,6 @@ impl Client for ConsumerClient {
             stream.write_all(&[b'\n']).unwrap();
         }
 
-        log::debug!("({}) closing consumer client", self.addr)
+        log::info!("({}) closing consumer client", self.addr)
     }
 }
