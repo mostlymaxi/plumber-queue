@@ -173,8 +173,8 @@ impl QueueServer {
             running_clone.store(false, Ordering::Relaxed);
             thread::sleep(Duration::from_millis(100));
 
-            let _ = TcpStream::connect_timeout(&self.addr_consumer, Duration::from_secs(2)).unwrap();
-            let _ = TcpStream::connect_timeout(&self.addr_producer, Duration::from_secs(2)).unwrap();
+            let _ = TcpStream::connect_timeout(&self.addr_consumer, Duration::from_secs(2));
+            let _ = TcpStream::connect_timeout(&self.addr_producer, Duration::from_secs(2));
         }).unwrap();
 
         let p_listener = TcpListener::bind(self.addr_producer).unwrap();
