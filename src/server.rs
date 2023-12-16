@@ -18,14 +18,14 @@ pub struct QueueServer {
 
 impl Drop for QueueServer {
     fn drop(&mut self) {
-        log::info!("writing queue to disk...");
-        let f = fs::File::create("test_backup").unwrap();
-        let mut f = BufWriter::new(f);
-        while let Some(s) = self.ringbuf.pop() {
-            f.write_all(s.as_bytes()).unwrap();
-            f.write_all(&[b'\n']).unwrap();
-        }
-        log::info!("done!");
+        // log::info!("writing queue to disk...");
+        // let f = fs::File::create("test_backup").unwrap();
+        // let mut f = BufWriter::new(f);
+        // while let Some(s) = self.ringbuf.pop() {
+        //     f.write_all(s.as_bytes()).unwrap();
+        //     f.write_all(&[b'\n']).unwrap();
+        // }
+        // log::info!("done!");
     }
 }
 
@@ -175,12 +175,12 @@ impl QueueServer {
     fn disk_syncer(sync_receiver: Receiver<String>) {
         let db = sled::open("test_disk_syncer").unwrap();
         let mut i: usize = 0;
-        const max_size: usize = 10_000;
+        const MAX_SIZE: usize = 1_000;
 
         for msg in sync_receiver {
             db.insert(b"last", &i.to_be_bytes()).unwrap();
             db.insert(&i.to_be_bytes(), msg.as_bytes()).unwrap();
-            i = (i + 1) % max_size;
+            i = (i + 1) % MAX_SIZE;
         }
     }
 
@@ -192,15 +192,16 @@ impl QueueServer {
             running_clone.store(false, Ordering::Relaxed);
             thread::sleep(Duration::from_millis(100));
 
-            let _ = TcpStream::connect(&self.addr_producer);
-            let _ = TcpStream::connect(&self.addr_consumer);
+            let _ = TcpStream::connect_timeout(&self.addr_producer, Duration::from_secs(2));
+            let _ = TcpStream::connect_timeout(&self.addr_consumer, Duration::from_secs(2));
         }).unwrap();
 
         let p_listener = TcpListener::bind(self.addr_producer).unwrap();
         let c_listener = TcpListener::bind(self.addr_consumer).unwrap();
         let heartbeat = Duration::from_millis(self.heartbeat);
 
-        let (sync_sender, sync_receiver) = crossbeam::channel::bounded(self.ringbuf.capacity());
+        let (sync_sender, sync_receiver) = crossbeam::channel::unbounded();
+        //let (sync_sender, sync_receiver) = crossbeam::channel::bounded(self.ringbuf.capacity());
 
         log::debug!("spawning producer handler");
         let ringbuf_clone = self.ringbuf.clone();
