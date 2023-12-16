@@ -199,7 +199,7 @@ impl QueueServer {
 
     fn disk_syncer(queue_size: usize, sync_receiver: Receiver<QueueMessage>, sync_consumer: Arc<AtomicUsize>) {
         let mut current_page = CurrentPage::A;
-        let f = fs::File::create("test_sync_v2_A").unwrap();
+        let f = fs::File::create("/tmp/test_sync_v2_A").unwrap();
         let mut f = BufWriter::new(f);
         let mut i: usize = 0;
 
@@ -209,12 +209,12 @@ impl QueueServer {
                 f = match current_page {
                     CurrentPage::A => {
                         current_page = CurrentPage::B;
-                        let tmp = fs::File::create("test_sync_v2_B").unwrap();
+                        let tmp = fs::File::create("/tmp/test_sync_v2_B").unwrap();
                         BufWriter::new(tmp)
                     },
                     CurrentPage::B => {
                         current_page = CurrentPage::A;
-                        let tmp = fs::File::create("test_sync_v2_A").unwrap();
+                        let tmp = fs::File::create("/tmp/test_sync_v2_A").unwrap();
                         BufWriter::new(tmp)
                     },
                 };
