@@ -156,13 +156,13 @@ impl KeepAlive for TcpStream {
             match line {
                 Ok(line) => { log::trace!("{line}") },
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    alive.store(false, Ordering::Relaxed);
+                    // alive.store(false, Ordering::Relaxed);
                 },
                 Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    alive.store(false, Ordering::Relaxed);
+                    // alive.store(false, Ordering::Relaxed);
                 },
                 Err(_) => {
-                    alive.store(false, Ordering::Relaxed);
+                    // alive.store(false, Ordering::Relaxed);
                 }
             };
         }
@@ -193,7 +193,7 @@ impl Client for ConsumerClient {
                 None => {
                     stream.flush().unwrap();
                     log::trace!("({}) waiting for data...", self.addr);
-                    thread::sleep(Duration::from_millis(1000));
+                    thread::sleep(Duration::from_millis(5));
                     continue;
                 }
             };
