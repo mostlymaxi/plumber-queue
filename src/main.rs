@@ -2,6 +2,7 @@ use clap::Parser;
 use server::QueueServer;
 
 mod handlers;
+mod syncer;
 mod server;
 
 /// the simplest queue around
