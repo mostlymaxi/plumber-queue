@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::net::{TcpListener, SocketAddr, IpAddr, Ipv4Addr, TcpStream};
+use std::num::ParseIntError;
 use std::sync::atomic::{AtomicBool, Ordering, AtomicUsize};
 use std::{thread, sync::Arc, time::Duration};
 
@@ -13,6 +14,9 @@ pub struct QueueMessage {
     offset: usize,
     msg: String,
 }
+
+#[derive(Debug)]
+struct QueueMessageError;
 
 impl QueueMessage {
     pub fn new(offset: usize, msg: String) -> QueueMessage {
@@ -28,6 +32,18 @@ impl QueueMessage {
 
     pub fn get_offset(&self) -> usize {
         self.offset
+    }
+
+    pub fn offset_from_str(&self, value: &str) -> Result<usize, QueueMessageError> {
+        let value = value.trim();
+        let mut value_iter = value.split(' ');
+        let mut offset = value_iter.next().ok_or(QueueMessageError)?;
+
+        offset = offset.trim_start_matches('[');
+        offset = offset.trim_end_matches(']');
+
+        Ok(usize::from_str_radix(offset, 16)
+            .map_err(|_| QueueMessageError)?)
     }
 }
 
