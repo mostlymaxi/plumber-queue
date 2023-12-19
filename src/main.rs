@@ -18,7 +18,7 @@ struct Args {
     /// port to use to listen for producers
     #[arg(short, long, default_value_t=server::QueueServer::DEFAULT_PRODUCER_PORT)]
     producer_port: u16,
-    /// heartbeat interval in milliseconds for consumers
+    /// heartbeat interval in milliseconds for consumers (DEPRECATED)
     #[arg(long, default_value_t=server::QueueServer::DEFAULT_HEARTBEAT_MS)]
     heartbeat: u64,
 }

@@ -268,44 +268,6 @@ impl QueueServer {
         }
     }
 
-    // fn disk_syncer(queue_size: usize, sync_receiver: Receiver<QueueMessage>, sync_consumer: Arc<AtomicUsize>) {
-    //     let mut current_page = CurrentPage::A;
-    //     let f = fs::File::create("/tmp/test_sync_v2_A").unwrap();
-    //     let mut f = BufWriter::new(f);
-    //     let mut i: usize = 0;
-
-    //     for qm in sync_receiver {
-    //         if i == queue_size {
-    //             f.flush().unwrap();
-    //             f = match current_page {
-    //                 CurrentPage::A => {
-    //                     current_page = CurrentPage::B;
-    //                     let tmp = fs::File::create("/tmp/test_sync_v2_B").unwrap();
-    //                     BufWriter::new(tmp)
-    //                 },
-    //                 CurrentPage::B => {
-    //                     current_page = CurrentPage::A;
-    //                     let tmp = fs::File::create("/tmp/test_sync_v2_A").unwrap();
-    //                     BufWriter::new(tmp)
-    //                 },
-    //             };
-    //             i = 0;
-    //         }
-
-    //         f.write_all(qm.to_string().as_bytes()).unwrap();
-    //         f.write_all(&[b'\n']).unwrap();
-    //         f.write_all(sync_consumer
-    //             .load(Ordering::Relaxed)
-    //             .to_string()
-    //             .as_bytes()
-    //         ).unwrap();
-    //         f.write_all(&[b'\n']).unwrap();
-    //         i += 1;
-    //     }
-
-    //     f.flush().unwrap();
-    // }
-
     pub async fn run(self) {
         log::debug!("starting queue server...");
 
