@@ -1,14 +1,12 @@
-use std::fs;
-use std::io::{self, BufWriter, Write};
 use std::net::{SocketAddr, Ipv4Addr, IpAddr};
 use tokio::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering, AtomicUsize};
-use std::{thread, sync::Arc, time::Duration};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
+use std::io;
 use crate::handlers::{ProducerClient, ConsumerClient};
 use tokio::{signal, select};
-use tokio::sync::{watch, mpsc};
-use tokio::sync::broadcast;
+use tokio::sync::watch;
 
 #[derive(Clone, Debug)]
 pub struct QueueMessage {
@@ -17,7 +15,7 @@ pub struct QueueMessage {
 }
 
 #[derive(Debug)]
-struct QueueMessageError;
+pub struct QueueMessageError;
 
 impl QueueMessage {
     pub fn new(offset: usize, msg: String) -> QueueMessage {
@@ -35,6 +33,7 @@ impl QueueMessage {
         self.offset
     }
 
+    #[allow(dead_code)]
     pub fn offset_from_str(&self, value: &str) -> Result<usize, QueueMessageError> {
         let value = value.trim();
         let mut value_iter = value.split(' ');
@@ -58,20 +57,39 @@ impl ToString for QueueMessage {
 pub struct QueueServer {
     addr_producer: SocketAddr,
     addr_consumer: SocketAddr,
-    tx: flume::Sender<QueueMessage>,
-    rx: flume::Receiver<QueueMessage>,
+    channels: QueueChannels,
     stop_rx: watch::Receiver<()>,
-    producer_offset: Arc<AtomicUsize>,
-    heartbeat: u64
+    _heartbeat: u64
 }
 
-enum CurrentPage {
-    A,
-    B
+#[derive(Clone)]
+pub struct QueueChannels {
+    pub main_tx: flume::Sender<QueueMessage>,
+    pub main_rx: flume::Receiver<QueueMessage>,
+    pub producer_sync_tx: flume::Sender<QueueMessage>,
+    pub producer_sync_rx: flume::Receiver<QueueMessage>,
+    pub consumer_sync_offset: Arc<AtomicUsize>,
+    pub producer_sync_offset: Arc<AtomicUsize>,
 }
 
-// maybe send copy of data down channel that gets written to disk????
-// idk
+impl QueueChannels {
+    fn new(n: usize) -> Self {
+        let (main_tx, main_rx) = flume::bounded(n);
+        let (producer_sync_tx, producer_sync_rx) = flume::bounded(n);
+        let consumer_sync_offset = Arc::new(AtomicUsize::new(0));
+        let producer_sync_offset = Arc::new(AtomicUsize::new(0));
+
+        Self {
+            main_tx,
+            main_rx,
+            producer_sync_tx,
+            producer_sync_rx,
+            consumer_sync_offset,
+            producer_sync_offset,
+        }
+    }
+}
+
 impl QueueServer {
     pub const DEFAULT_QUEUE_SIZE: usize = 1_000_000;
     pub const DEFAULT_PRODUCER_PORT: u16 = 8084;
@@ -81,9 +99,8 @@ impl QueueServer {
 
     #[allow(dead_code)]
     pub fn new() -> Self {
-        let (tx, rx) = flume::bounded(Self::DEFAULT_QUEUE_SIZE);
+        let channels = QueueChannels::new(Self::DEFAULT_QUEUE_SIZE);
         let (stop_tx, stop_rx) = watch::channel(());
-        let producer_offset = Arc::new(AtomicUsize::new(0));
 
         tokio::spawn(async move {
             let _ = signal::ctrl_c().await;
@@ -99,24 +116,21 @@ impl QueueServer {
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
             Self::DEFAULT_CONSUMER_PORT);
 
-        let heartbeat = Self::DEFAULT_HEARTBEAT_MS;
+        let _heartbeat = Self::DEFAULT_HEARTBEAT_MS;
 
         Self {
             addr_producer,
             addr_consumer,
-            tx,
-            rx,
+            channels,
             stop_rx,
-            producer_offset,
-            heartbeat
+            _heartbeat
         }
     }
 
     #[allow(dead_code)]
     pub fn new_with_size(n: usize) -> Self {
-        let (tx, rx) = flume::bounded(n);
+        let channels = QueueChannels::new(n);
         let (stop_tx, stop_rx) = watch::channel(());
-        let producer_offset = Arc::new(AtomicUsize::new(0));
 
         tokio::spawn(async move {
             let _ = signal::ctrl_c().await;
@@ -132,26 +146,22 @@ impl QueueServer {
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
             Self::DEFAULT_CONSUMER_PORT);
 
-        let heartbeat = Self::DEFAULT_HEARTBEAT_MS;
+        let _heartbeat = Self::DEFAULT_HEARTBEAT_MS;
 
         Self {
             addr_producer,
             addr_consumer,
-            tx,
-            rx,
+            channels,
             stop_rx,
-            producer_offset,
-            heartbeat
+            _heartbeat
         }
     }
 
     #[allow(dead_code)]
     pub fn with_size(mut self, n: usize) -> Self {
-        let (tx, rx) = flume::bounded(n);
+        let channels = QueueChannels::new(n);
 
-
-        self.tx = tx;
-        self.rx = rx;
+        self.channels = channels;
         self
     }
 
@@ -189,6 +199,17 @@ impl QueueServer {
         self
     }
 
+    fn new_producer_client(&self, socket: TcpStream, addr: SocketAddr) -> ProducerClient {
+        ProducerClient::new(
+            self.channels.main_tx.clone(),
+            self.channels.main_rx.clone(),
+            self.channels.producer_sync_tx.clone(),
+            self.channels.producer_sync_offset.clone(),
+            socket,
+            addr
+        )
+    }
+
     async fn producer_client_handler(&self) -> Result<(), io::Error> {
         let listener = TcpListener::bind(&self.addr_producer).await?;
 
@@ -203,13 +224,7 @@ impl QueueServer {
 
             log::info!("({}) accepted a producer client", &addr);
 
-            let producer_client = ProducerClient::new(
-                self.tx.clone(),
-                self.rx.clone(),
-                self.producer_offset.clone(),
-                socket,
-                addr
-            );
+            let producer_client = self.new_producer_client(socket, addr);
 
             tokio::spawn(async move {
                 producer_client.run().await;
@@ -217,6 +232,15 @@ impl QueueServer {
             });
 
         }
+    }
+
+    fn new_consumer_client(&self, socket: TcpStream, addr: SocketAddr) -> ConsumerClient {
+        ConsumerClient::new(
+            self.channels.main_rx.clone(),
+            self.channels.consumer_sync_offset.clone(),
+            socket,
+            addr
+        )
     }
 
     async fn consumer_client_handler(&self) -> Result<(), io::Error> {
@@ -233,11 +257,7 @@ impl QueueServer {
 
             log::info!("({}) accepted a consumer client", &addr);
 
-            let consumer_client = ConsumerClient::new(
-                self.rx.clone(),
-                socket,
-                addr
-            );
+            let consumer_client = self.new_consumer_client(socket, addr);
 
             tokio::spawn(async move {
                 consumer_client.run().await;
