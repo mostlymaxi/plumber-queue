@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use std::io;
 use crate::handlers::{ProducerClient, ConsumerClient};
+use crate::syncer::{QueueSyncer, ConsumerOffsetSyncer};
 use tokio::{signal, select};
 use tokio::sync::watch;
 
@@ -307,6 +308,24 @@ impl QueueServer {
 
     pub async fn run(self) {
         log::debug!("starting queue server...");
+
+        let mut producer_sync = QueueSyncer::new(
+            self.channels.main_tx.capacity().unwrap_or(Self::DEFAULT_QUEUE_SIZE),
+            self.channels.producer_sync_rx.clone(),
+            "/tmp/qtest".into()
+        );
+        let _producer_sync_task = tokio::spawn(async move {
+            producer_sync.run().await;
+        });
+
+        let consumer_sync = ConsumerOffsetSyncer::new(
+            self.channels.main_tx.capacity().unwrap_or(Self::DEFAULT_QUEUE_SIZE),
+            self.channels.consumer_sync_offset.clone(),
+            "/tmp/qtest".into()
+        );
+        let _consumer_sync_task = tokio::spawn(async move {
+            consumer_sync.run().await;
+        });
 
         let mut stop_rx_clone = self.stop_rx.clone();
         let self_clone  = self.clone();

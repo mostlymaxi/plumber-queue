@@ -10,26 +10,27 @@ use crate::server::QueueMessage;
 
 
 pub struct ProducerClient {
-    tx: flume::Sender<QueueMessage>,
-    rx: flume::Receiver<QueueMessage>,
-    // tx_sync: mpsc::Sender<QueueMessage>,
-    offset: Arc<AtomicUsize>,
+    main_tx: flume::Sender<QueueMessage>,
+    main_rx: flume::Receiver<QueueMessage>,
+    producer_sync_tx: flume::Sender<QueueMessage>,
+    producer_sync_offset: Arc<AtomicUsize>,
     stream: TcpStream,
     addr: SocketAddr,
 }
 
 impl ProducerClient {
-    pub fn new(tx: flume::Sender<QueueMessage>,
-            rx: flume::Receiver<QueueMessage>,
-            // tx_sync: mpsc::Sender<QueueMessage>,
-            offset: Arc<AtomicUsize>,
+    pub fn new(
+            main_tx: flume::Sender<QueueMessage>,
+            main_rx: flume::Receiver<QueueMessage>,
+            producer_sync_tx: flume::Sender<QueueMessage>,
+            producer_sync_offset: Arc<AtomicUsize>,
             stream: TcpStream,
             addr: SocketAddr) -> Self {
         Self {
-            tx,
-            rx,
-            // tx_sync,
-            offset,
+            main_tx,
+            main_rx,
+            producer_sync_tx,
+            producer_sync_offset,
             stream,
             addr
         }
@@ -49,30 +50,37 @@ impl ProducerClient {
                 },
             };
 
-            if self.tx.is_full() {
-                let _ = self.rx.recv_async().await;
+            if self.main_tx.is_full() {
+                let _ = self.main_rx.recv_async().await;
             }
 
             log::trace!("({})) {line}", self.addr);
             let qm = QueueMessage::new(
-                self.offset.fetch_add(1, Ordering::Relaxed),
+                self.producer_sync_offset.fetch_add(1, Ordering::Relaxed),
                 line
             );
-            self.tx.send_async(qm).await.unwrap();
+            self.main_tx.send_async(qm.clone()).await.unwrap();
+            self.producer_sync_tx.send_async(qm).await.unwrap();
         }
     }
 }
 
 pub struct ConsumerClient {
-    rx: flume::Receiver<QueueMessage>,
+    main_rx: flume::Receiver<QueueMessage>,
+    consumer_sync_offset: Arc<AtomicUsize>,
     stream: TcpStream,
     addr: SocketAddr,
 }
 
 impl ConsumerClient {
-    pub fn new(rx: flume::Receiver<QueueMessage>, stream: TcpStream, addr: SocketAddr) -> Self {
+    pub fn new(
+            main_rx: flume::Receiver<QueueMessage>,
+            consumer_sync_offset: Arc<AtomicUsize>,
+            stream: TcpStream,
+            addr: SocketAddr) -> Self {
         Self {
-            rx,
+            main_rx,
+            consumer_sync_offset,
             stream,
             addr
         }
@@ -83,7 +91,7 @@ impl ConsumerClient {
             self.stream, LinesCodec::new_with_max_length(2048)
         );
 
-        let mut rx = self.rx.stream();
+        let mut rx = self.main_rx.stream();
         loop {
             select! {
                 biased;
@@ -91,6 +99,7 @@ impl ConsumerClient {
                 Some(qm) = rx.next() => {
                     log::trace!("{}", qm.to_string());
                     stream.send(qm.get_msg()).await.unwrap();
+                    self.consumer_sync_offset.store(qm.get_offset(), Ordering::Relaxed);
                 }
                 None = stream.next() => break,
             };
