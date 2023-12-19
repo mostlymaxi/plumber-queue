@@ -1,11 +1,11 @@
+use std::io::SeekFrom;
 use std::path::PathBuf;
-use std::io::{Write, Seek, SeekFrom};
 use futures::StreamExt;
 use tokio::io::{BufWriter, AsyncWriteExt, AsyncSeekExt};
 use tokio::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{fs};
+use std::fs;
 use tokio::time;
 use std::time::Duration;
 
