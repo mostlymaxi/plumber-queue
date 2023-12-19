@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::net::SocketAddr;
-use tokio::select;
+use std::time::Duration;
+use tokio::{select, time};
 use tokio::net::TcpStream;
 use tokio_util::codec::{LinesCodec, Framed};
 use tokio_stream::StreamExt;
@@ -95,14 +96,18 @@ impl ConsumerClient {
         let mut rx = self.main_rx.stream();
         loop {
             select! {
-                biased;
-
                 Some(qm) = rx.next() => {
                     log::trace!("({}) {}", self.addr, qm.to_string());
-                    stream.send(qm.get_msg()).await.unwrap();
+                    stream.feed(qm.get_msg()).await.unwrap();
                     self.consumer_sync_offset.store(qm.get_offset(), Ordering::Relaxed);
                 }
                 None = stream.next() => break,
+                _ = time::sleep(Duration::from_millis(500)) => {
+                    // this has got to be a bug... not sure why this has to be so specific...
+                    <Framed<tokio::net::TcpStream, LinesCodec> as SinkExt<String>>::flush(&mut stream)
+                        .await
+                        .unwrap();
+                }
             };
         }
     }

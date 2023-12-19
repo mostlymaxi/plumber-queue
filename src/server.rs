@@ -76,7 +76,7 @@ pub struct QueueChannels {
 impl QueueChannels {
     fn new(n: usize) -> Self {
         let (main_tx, main_rx) = flume::bounded(n);
-        let (producer_sync_tx, producer_sync_rx) = flume::bounded(n / 4);
+        let (producer_sync_tx, producer_sync_rx) = flume::bounded(10000);
         let consumer_sync_offset = Arc::new(AtomicUsize::new(0));
         let producer_sync_offset = Arc::new(AtomicUsize::new(0));
 

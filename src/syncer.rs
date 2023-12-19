@@ -64,7 +64,7 @@ impl ConsumerOffsetSyncer {
             f.seek(SeekFrom::Start(0)).await.unwrap();
             f.flush().await.unwrap();
             select! {
-                _ = time::sleep(Duration::from_secs(1)) => {},
+                _ = time::sleep(Duration::from_millis(500)) => {},
                 _ = self.stop_rx.changed() => break,
             }
         }
@@ -103,7 +103,7 @@ impl QueueSyncer {
         loop {
             select! {
                 _ = self.stop_rx.changed() => break,
-                _ = time::sleep(Duration::from_secs(1)) => f.flush().await.unwrap(),
+                _ = time::sleep(Duration::from_millis(500)) => f.flush().await.unwrap(),
                 Some(qm) = rx.next() => {
                     if i >= self.queue_size {
                         let file_name = match self.sync_page {
