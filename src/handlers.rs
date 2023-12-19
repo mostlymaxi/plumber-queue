@@ -1,27 +1,34 @@
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering, AtomicUsize}}, net::SocketAddr, time::Duration, thread};
-use tokio::{io::{BufWriter, AsyncBufReadExt, AsyncWriteExt, BufReader, AsyncBufRead}, sync::broadcast::error::RecvError};
-use tokio::sync::broadcast;
+use tokio::{sync::{broadcast::error::RecvError}, io::AsyncWriteExt, select};
+use tokio::sync::{broadcast, mpsc};
 use tokio::net::TcpStream;
 use tokio_util::codec::{LinesCodec, Framed};
 use tokio_stream::{Stream, StreamExt, wrappers::{BroadcastStream, errors::BroadcastStreamRecvError}};
+use futures::sink::SinkExt;
 
 use crate::server::QueueMessage;
 
 
 pub struct ProducerClient {
-    tx: broadcast::Sender<QueueMessage>,
+    tx: flume::Sender<QueueMessage>,
+    rx: flume::Receiver<QueueMessage>,
+    // tx_sync: mpsc::Sender<QueueMessage>,
     offset: Arc<AtomicUsize>,
     stream: TcpStream,
     addr: SocketAddr,
 }
 
 impl ProducerClient {
-    pub fn new(tx: broadcast::Sender<QueueMessage>,
+    pub fn new(tx: flume::Sender<QueueMessage>,
+            rx: flume::Receiver<QueueMessage>,
+            // tx_sync: mpsc::Sender<QueueMessage>,
             offset: Arc<AtomicUsize>,
             stream: TcpStream,
             addr: SocketAddr) -> Self {
         Self {
             tx,
+            rx,
+            // tx_sync,
             offset,
             stream,
             addr
@@ -42,23 +49,28 @@ impl ProducerClient {
                 },
             };
 
+            if self.tx.is_full() {
+                let _ = self.rx.recv_async().await;
+            }
+
             log::trace!("({})) {line}", self.addr);
-            self.tx.send(QueueMessage::new(
+            let qm = QueueMessage::new(
                 self.offset.fetch_add(1, Ordering::Relaxed),
                 line
-            )).unwrap();
+            );
+            self.tx.send_async(qm).await.unwrap();
         }
     }
 }
 
 pub struct ConsumerClient {
-    rx: broadcast::Receiver<QueueMessage>,
+    rx: flume::Receiver<QueueMessage>,
     stream: TcpStream,
     addr: SocketAddr,
 }
 
 impl ConsumerClient {
-    pub fn new(rx: broadcast::Receiver<QueueMessage>, stream: TcpStream, addr: SocketAddr) -> Self {
+    pub fn new(rx: flume::Receiver<QueueMessage>, stream: TcpStream, addr: SocketAddr) -> Self {
         Self {
             rx,
             stream,
@@ -66,26 +78,23 @@ impl ConsumerClient {
         }
     }
 
-    pub async fn run(mut self) {
-        let mut stream = BufWriter::new(self.stream);
+    pub async fn run(self) {
+        let mut stream = Framed::new(
+            self.stream, LinesCodec::new_with_max_length(2048)
+        );
 
+        let mut rx = self.rx.stream();
         loop {
-            let msg = self.rx.recv().await;
-            let qm = match msg {
-                Ok(qm) => qm,
-                Err(RecvError::Lagged(_)) => {
-                    log::warn!("consumer lagging behind queue, losing data");
-                    continue;
-                },
-                Err(_) => break,
+            select! {
+                biased;
+
+                Some(qm) = rx.next() => {
+                    log::trace!("{}", qm.to_string());
+                    stream.send(qm.get_msg()).await.unwrap();
+                }
+                None = stream.next() => break,
             };
-
-            log::trace!("{}", qm.to_string());
-            stream.write_all(qm.get_msg().as_bytes()).await.unwrap();
-            stream.write_all(&[b'\n']).await.unwrap();
         }
-
-        stream.flush().await.unwrap();
     }
 }
 
