@@ -76,7 +76,7 @@ pub struct QueueChannels {
 impl QueueChannels {
     fn new(n: usize) -> Self {
         let (main_tx, main_rx) = flume::bounded(n);
-        let (producer_sync_tx, producer_sync_rx) = flume::bounded(n);
+        let (producer_sync_tx, producer_sync_rx) = flume::bounded(n / 4);
         let consumer_sync_offset = Arc::new(AtomicUsize::new(0));
         let producer_sync_offset = Arc::new(AtomicUsize::new(0));
 
@@ -312,18 +312,20 @@ impl QueueServer {
         let mut producer_sync = QueueSyncer::new(
             self.channels.main_tx.capacity().unwrap_or(Self::DEFAULT_QUEUE_SIZE),
             self.channels.producer_sync_rx.clone(),
+            self.stop_rx.clone(),
             "/tmp/qtest".into()
         );
-        let _producer_sync_task = tokio::spawn(async move {
+        let producer_sync_task = tokio::spawn(async move {
             producer_sync.run().await;
         });
 
-        let consumer_sync = ConsumerOffsetSyncer::new(
+        let mut consumer_sync = ConsumerOffsetSyncer::new(
             self.channels.main_tx.capacity().unwrap_or(Self::DEFAULT_QUEUE_SIZE),
             self.channels.consumer_sync_offset.clone(),
+            self.stop_rx.clone(),
             "/tmp/qtest".into()
         );
-        let _consumer_sync_task = tokio::spawn(async move {
+        let consumer_sync_task = tokio::spawn(async move {
             consumer_sync.run().await;
         });
 
@@ -349,6 +351,8 @@ impl QueueServer {
         log::info!("queue server ready");
         producer_task.await.unwrap();
         consumer_task.await.unwrap();
+        producer_sync_task.await.unwrap();
+        consumer_sync_task.await.unwrap();
 
     }
 
