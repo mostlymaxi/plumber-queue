@@ -1,9 +1,9 @@
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering, AtomicUsize}}, net::SocketAddr, time::Duration, thread};
-use tokio::{sync::{broadcast::error::RecvError}, io::AsyncWriteExt, select};
-use tokio::sync::{broadcast, mpsc};
+use std::{sync::{Arc, atomic::{Ordering, AtomicUsize}}, net::SocketAddr};
+use tokio::{select};
+
 use tokio::net::TcpStream;
 use tokio_util::codec::{LinesCodec, Framed};
-use tokio_stream::{Stream, StreamExt, wrappers::{BroadcastStream, errors::BroadcastStreamRecvError}};
+use tokio_stream::{StreamExt};
 use futures::sink::SinkExt;
 
 use crate::server::QueueMessage;

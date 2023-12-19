@@ -5,7 +5,7 @@ use tokio::io::{BufWriter, AsyncWriteExt, AsyncSeekExt};
 use tokio::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{thread, fs};
+use std::{fs};
 use tokio::time;
 use std::time::Duration;
 

@@ -43,8 +43,8 @@ impl QueueMessage {
         offset = offset.trim_start_matches('[');
         offset = offset.trim_end_matches(']');
 
-        Ok(usize::from_str_radix(offset, 16)
-            .map_err(|_| QueueMessageError)?)
+        usize::from_str_radix(offset, 16)
+            .map_err(|_| QueueMessageError)
     }
 }
 
