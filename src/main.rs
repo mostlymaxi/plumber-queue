@@ -18,12 +18,13 @@ struct Args {
     /// port to use to listen for producers
     #[arg(short, long, default_value_t=server::QueueServer::DEFAULT_PRODUCER_PORT)]
     producer_port: u16,
-    /// heartbeat interval in milliseconds for consumers
+    /// heartbeat interval in milliseconds for consumers (DEPRECATED)
     #[arg(long, default_value_t=server::QueueServer::DEFAULT_HEARTBEAT_MS)]
     heartbeat: u64,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
     env_logger::init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"));
@@ -33,5 +34,5 @@ fn main() {
         .with_consumer_port(args.consumer_port)
         .with_producer_port(args.producer_port);
 
-    qs.run();
+    qs.run().await;
 }

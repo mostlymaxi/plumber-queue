@@ -1,211 +1,114 @@
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering, AtomicUsize}}, net::{TcpStream, SocketAddr}, time::Duration, io::{BufReader, self, BufWriter, BufRead, Write}, thread};
-
-use crossbeam::{queue::ArrayQueue, channel::Sender};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::{select, time};
+use tokio::net::TcpStream;
+use tokio_util::codec::{LinesCodec, Framed};
+use tokio_stream::StreamExt;
+use futures::sink::SinkExt;
 
 use crate::server::QueueMessage;
 
-pub trait Client: Sized {
-    fn run(self) {}
-}
-
-pub struct GeneralClient {
-    ringbuf: Arc<ArrayQueue<QueueMessage>>,
-    sync_sender: Sender<QueueMessage>,
-    sync_consumer: Arc<AtomicUsize>,
-    stream: TcpStream,
-    heartbeat: Duration,
-    addr: SocketAddr,
-    running: Arc<AtomicBool>,
-}
-
-impl GeneralClient {
-    pub fn new(ringbuf: Arc<ArrayQueue<QueueMessage>>,
-               sync_sender: Sender<QueueMessage>,
-               sync_consumer: Arc<AtomicUsize>,
-               stream: TcpStream,
-               heartbeat: Duration,
-               addr: SocketAddr,
-               running: Arc<AtomicBool>,) -> Self {
-        Self {
-            ringbuf,
-            sync_sender,
-            sync_consumer,
-            stream,
-            heartbeat,
-            addr,
-            running,
-        }
-    }
-}
-
-impl Client for GeneralClient {}
 
 pub struct ProducerClient {
-    ringbuf: Arc<ArrayQueue<QueueMessage>>,
-    sync_sender: Sender<QueueMessage>,
-    _sync_consumer: Arc<AtomicUsize>,
+    main_tx: flume::Sender<QueueMessage>,
+    main_rx: flume::Receiver<QueueMessage>,
+    producer_sync_tx: flume::Sender<QueueMessage>,
+    producer_sync_offset: Arc<AtomicUsize>,
     stream: TcpStream,
-    _heartbeat: Duration,
     addr: SocketAddr,
-    running: Arc<AtomicBool>,
 }
 
-impl From<GeneralClient> for ProducerClient {
-    fn from(c: GeneralClient) -> Self {
+impl ProducerClient {
+    pub fn new(
+            main_tx: flume::Sender<QueueMessage>,
+            main_rx: flume::Receiver<QueueMessage>,
+            producer_sync_tx: flume::Sender<QueueMessage>,
+            producer_sync_offset: Arc<AtomicUsize>,
+            stream: TcpStream,
+            addr: SocketAddr) -> Self {
         Self {
-            ringbuf: c.ringbuf,
-            sync_sender: c.sync_sender,
-            _sync_consumer: c.sync_consumer,
-            stream: c.stream,
-            _heartbeat: c.heartbeat,
-            addr: c.addr,
-            running: c.running
+            main_tx,
+            main_rx,
+            producer_sync_tx,
+            producer_sync_offset,
+            stream,
+            addr
         }
     }
-}
 
-impl Client for ProducerClient {
-    fn run(self) {
-        log::info!("({}) accepted new producer client", self.addr);
+    pub async fn run(self) {
+        let mut stream = Framed::new(
+            self.stream, LinesCodec::new_with_max_length(2048)
+        );
 
-        self.stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let stream = BufReader::new(&self.stream);
-        let mut stream = stream.lines();
-        let mut offset = 0;
-
-        while self.running.load(Ordering::Relaxed) {
-            let Some(line) = stream.next() else { break };
-
+        while let Some(line) = stream.next().await {
             let line = match line {
                 Ok(l) => l,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    log::trace!("({}) waiting for data...", self.addr);
-                    continue;
-                },
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    log::trace!("({}) waiting for data...", self.addr);
-                    continue;
-                },
                 Err(e) => {
-                    log::error!("({}) connection failed: {:#?}", self.addr, e);
+                    log::error!("{:?}", e);
                     break;
-                }
+                },
             };
 
-            log::trace!("({}) {:#?}", self.addr, line);
-            let qm = QueueMessage::new(offset, line);
-            self.ringbuf.force_push(qm.clone());
-            self.sync_sender.send(qm).unwrap();
-            offset += 1;
-        }
+            if self.main_tx.is_full() {
+                let _ = self.main_rx.recv_async().await;
+            }
 
-        log::info!("({}) closing producer client", self.addr)
+            log::trace!("({})) {line}", self.addr);
+            let qm = QueueMessage::new(
+                self.producer_sync_offset.fetch_add(1, Ordering::Relaxed),
+                line
+            );
+            self.main_tx.send_async(qm.clone()).await.unwrap();
+            self.producer_sync_tx.send_async(qm).await.unwrap();
+        }
     }
 }
 
 pub struct ConsumerClient {
-    ringbuf: Arc<ArrayQueue<QueueMessage>>,
+    main_rx: flume::Receiver<QueueMessage>,
+    consumer_sync_offset: Arc<AtomicUsize>,
     stream: TcpStream,
-    sync_consumer: Arc<AtomicUsize>,
-    heartbeat: Duration,
     addr: SocketAddr,
-    running: Arc<AtomicBool>,
 }
 
-impl Clone for ConsumerClient {
-    fn clone(&self) -> Self {
+impl ConsumerClient {
+    pub fn new(
+            main_rx: flume::Receiver<QueueMessage>,
+            consumer_sync_offset: Arc<AtomicUsize>,
+            stream: TcpStream,
+            addr: SocketAddr) -> Self {
         Self {
-            ringbuf: self.ringbuf.clone(),
-            stream: self.stream.try_clone().unwrap(),
-            sync_consumer: self.sync_consumer.clone(),
-            heartbeat: self.heartbeat,
-            addr: self.addr,
-            running: self.running.clone() }
-    }
-}
-
-impl From<GeneralClient> for ConsumerClient {
-    fn from(c: GeneralClient) -> Self {
-        Self {
-            ringbuf: c.ringbuf,
-            stream: c.stream,
-            sync_consumer: c.sync_consumer,
-            heartbeat: c.heartbeat,
-            addr: c.addr,
-            running: c.running
+            main_rx,
+            consumer_sync_offset,
+            stream,
+            addr
         }
     }
-}
 
-trait KeepAlive {
-    fn keepalive(&self, heartbeat: Duration, alive: Arc<AtomicBool>);
-}
+    pub async fn run(self) {
+        let mut stream = Framed::new(
+            self.stream, LinesCodec::new_with_max_length(2048)
+        );
 
-impl KeepAlive for TcpStream {
-    fn keepalive(&self, heartbeat: Duration, alive: Arc<AtomicBool>) {
-        self.set_read_timeout(Some(heartbeat)).unwrap();
-        let stream = BufReader::new(self);
-        let mut stream = stream.lines();
-
-        while alive.load(Ordering::Relaxed) {
-            let Some(line) = stream.next() else {
-                alive.store(false, Ordering::Relaxed);
-                continue;
-            };
-
-            match line {
-                Ok(line) => { log::trace!("{line}") },
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // alive.store(false, Ordering::Relaxed);
-                },
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    // alive.store(false, Ordering::Relaxed);
-                },
-                Err(_) => {
-                    // alive.store(false, Ordering::Relaxed);
+        let mut rx = self.main_rx.stream();
+        loop {
+            select! {
+                Some(qm) = rx.next() => {
+                    log::trace!("({}) {}", self.addr, qm.to_string());
+                    stream.feed(qm.get_msg()).await.unwrap();
+                    self.consumer_sync_offset.store(qm.get_offset(), Ordering::Relaxed);
+                }
+                None = stream.next() => break,
+                _ = time::sleep(Duration::from_millis(500)) => {
+                    // this has got to be a bug... not sure why this has to be so specific...
+                    <Framed<tokio::net::TcpStream, LinesCodec> as SinkExt<String>>::flush(&mut stream)
+                        .await
+                        .unwrap();
                 }
             };
         }
-    }
-}
-
-impl Client for ConsumerClient {
-    fn run(self) {
-        log::info!("({}) accepted new consumer client", self.addr);
-        let alive = Arc::new(AtomicBool::new(true));
-        let a = alive.clone();
-
-        let stream_clone = self.stream.try_clone().unwrap();
-        let heartbeat = self.heartbeat;
-        thread::spawn(move || stream_clone.keepalive(heartbeat, a));
-
-        let mut stream = BufWriter::new(&self.stream);
-
-
-        while self.running.load(Ordering::Relaxed) {
-            if !alive.load(Ordering::Relaxed) {
-                log::warn!("({}) dead heartbeat", self.addr);
-                break;
-            }
-
-            let qm = match self.ringbuf.pop() {
-                Some(qm) => qm,
-                None => {
-                    stream.flush().unwrap();
-                    log::trace!("({}) waiting for data...", self.addr);
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-            };
-
-            let line = qm.get_msg();
-            log::trace!("{:#?}", line);
-
-            stream.write_all(line.as_bytes()).unwrap();
-            stream.write_all(&[b'\n']).unwrap();
-            self.sync_consumer.store(qm.get_offset(), Ordering::Relaxed);
-        }
-
-        log::info!("({}) closing consumer client", self.addr)
     }
 }
