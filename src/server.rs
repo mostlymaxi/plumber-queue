@@ -1,15 +1,17 @@
 use std::fs;
 use std::io::{self, BufWriter, Write};
-use std::net::{TcpListener, SocketAddr, IpAddr, Ipv4Addr, TcpStream};
+use std::net::{SocketAddr, Ipv4Addr, IpAddr};
+use tokio::net::{TcpListener, TcpStream};
 use std::num::ParseIntError;
 use std::sync::atomic::{AtomicBool, Ordering, AtomicUsize};
 use std::{thread, sync::Arc, time::Duration};
 
-use crate::handlers::{GeneralClient, Client, ProducerClient, ConsumerClient};
-use crossbeam::channel::{Sender, Receiver};
-use crossbeam::queue::ArrayQueue;
+use crate::handlers::{ProducerClient, ConsumerClient};
+use tokio::{signal, select};
+use tokio::sync::{watch, mpsc};
+use tokio::sync::broadcast;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct QueueMessage {
     offset: usize,
     msg: String,
@@ -53,11 +55,13 @@ impl ToString for QueueMessage {
     }
 }
 
+#[derive(Clone)]
 pub struct QueueServer {
     addr_producer: SocketAddr,
     addr_consumer: SocketAddr,
-    ringbuf: Arc<ArrayQueue<QueueMessage>>,
-    running: Arc<AtomicBool>,
+    tx: broadcast::Sender<QueueMessage>,
+    stop_rx: watch::Receiver<()>,
+    producer_offset: Arc<AtomicUsize>,
     heartbeat: u64
 }
 
@@ -77,11 +81,17 @@ impl QueueServer {
 
     #[allow(dead_code)]
     pub fn new() -> Self {
-        let ringbuf: ArrayQueue<QueueMessage> = ArrayQueue::new(Self::DEFAULT_QUEUE_SIZE);
-        let ringbuf = Arc::new(ringbuf);
-        let running = Arc::new(AtomicBool::new(true));
+        let (tx, _) = broadcast::channel(Self::DEFAULT_QUEUE_SIZE);
+        let (stop_tx, stop_rx) = watch::channel(());
+        let producer_offset = Arc::new(AtomicUsize::new(0));
+
+        tokio::spawn(async move {
+            let _ = signal::ctrl_c().await;
+            let _ = stop_tx.send(());
+        });
 
         let (a, b, c, d) = Self::DEFAULT_IPV4;
+
         let addr_producer = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
             Self::DEFAULT_PRODUCER_PORT);
@@ -94,19 +104,26 @@ impl QueueServer {
         Self {
             addr_producer,
             addr_consumer,
-            ringbuf,
-            running,
+            tx,
+            stop_rx,
+            producer_offset,
             heartbeat
         }
     }
 
     #[allow(dead_code)]
     pub fn new_with_size(n: usize) -> Self {
-        let ringbuf: ArrayQueue<QueueMessage> = ArrayQueue::new(n);
-        let ringbuf = Arc::new(ringbuf);
-        let running = Arc::new(AtomicBool::new(true));
+        let (tx, _) = broadcast::channel(n);
+        let (stop_tx, stop_rx) = watch::channel(());
+        let producer_offset = Arc::new(AtomicUsize::new(0));
+
+        tokio::spawn(async move {
+            let _ = signal::ctrl_c().await;
+            let _ = stop_tx.send(());
+        });
 
         let (a, b, c, d) = Self::DEFAULT_IPV4;
+
         let addr_producer = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
             Self::DEFAULT_PRODUCER_PORT);
@@ -119,18 +136,18 @@ impl QueueServer {
         Self {
             addr_producer,
             addr_consumer,
-            ringbuf,
-            running,
+            tx,
+            stop_rx,
+            producer_offset,
             heartbeat
         }
     }
 
     #[allow(dead_code)]
     pub fn with_size(mut self, n: usize) -> Self {
-        let ringbuf: ArrayQueue<QueueMessage> = ArrayQueue::new(n);
-        let ringbuf = Arc::new(ringbuf);
+        let (tx, _) = broadcast::channel(n);
 
-        self.ringbuf = ringbuf;
+        self.tx = tx;
         self
     }
 
@@ -168,146 +185,126 @@ impl QueueServer {
         self
     }
 
-    fn client_handler<C>(
-        listener: TcpListener,
-        heartbeat: Duration,
-        ringbuf: Arc<ArrayQueue<QueueMessage>>,
-        sync_sender: Sender<QueueMessage>,
-        sync_consumer: Arc<AtomicUsize>,
-        running: Arc<AtomicBool>) where C: From<GeneralClient> + Client + Send + 'static {
-        // this is necessary for timeouts and things
-        listener.set_nonblocking(false).unwrap();
+    async fn producer_client_handler(&self) -> Result<(), io::Error> {
+        let listener = TcpListener::bind(&self.addr_producer).await?;
 
-        while running.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((stream, addr)) => {
-                    if !running.load(Ordering::Relaxed) { break; }
-
-                    let ringbuf_clone = ringbuf.clone();
-                    let running_clone = running.clone();
-                    let sync_sender_clone = sync_sender.clone();
-                    let sync_consumer_clone = sync_consumer.clone();
-
-                    let client = GeneralClient::new(
-                        ringbuf_clone,
-                        sync_sender_clone,
-                        sync_consumer_clone,
-                        stream,
-                        heartbeat,
-                        addr,
-                        running_clone
-                    );
-
-                    let client = C::from(client);
-                    let _ = thread::spawn(move || client.run());
-                },
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    log::trace!("waiting...");
-                    thread::sleep(Duration::from_secs(1));
+        loop {
+            let (socket, addr) = match listener.accept().await {
+                Ok((s, a)) => (s, a),
+                Err(e) => {
+                    log::error!("failed to accept connection: {:?}", e);
                     continue;
-                },
-                Err(e) => { log::error!("connection failed: {:#?}", e) }
-            }
-            log::debug!("closing client handler");
+                }
+            };
+
+            log::info!("({}) accepted a connection", &addr);
+
+            let producer_client = ProducerClient::new(
+                self.tx.clone(),
+                self.producer_offset.clone(),
+                socket,
+                addr
+            );
+
+            tokio::spawn(async move {
+                producer_client.run().await;
+                log::info!("({}) disconnected", &addr);
+            });
+
         }
     }
 
+    async fn consumer_client_handler(&self) -> Result<(), io::Error> {
+        let listener = TcpListener::bind(&self.addr_consumer).await?;
 
-    fn disk_syncer(queue_size: usize, sync_receiver: Receiver<QueueMessage>, sync_consumer: Arc<AtomicUsize>) {
-        let mut current_page = CurrentPage::A;
-        let f = fs::File::create("/tmp/test_sync_v2_A").unwrap();
-        let mut f = BufWriter::new(f);
-        let mut i: usize = 0;
+        loop {
+            let (socket, addr) = match listener.accept().await {
+                Ok((s, a)) => (s, a),
+                Err(e) => {
+                    log::error!("failed to accept connection: {:?}", e);
+                    continue;
+                }
+            };
 
-        for qm in sync_receiver {
-            if i == queue_size {
-                f.flush().unwrap();
-                f = match current_page {
-                    CurrentPage::A => {
-                        current_page = CurrentPage::B;
-                        let tmp = fs::File::create("/tmp/test_sync_v2_B").unwrap();
-                        BufWriter::new(tmp)
-                    },
-                    CurrentPage::B => {
-                        current_page = CurrentPage::A;
-                        let tmp = fs::File::create("/tmp/test_sync_v2_A").unwrap();
-                        BufWriter::new(tmp)
-                    },
-                };
-                i = 0;
-            }
+            log::info!("({}) accepted a connection", &addr);
 
-            f.write_all(qm.to_string().as_bytes()).unwrap();
-            f.write_all(&[b'\n']).unwrap();
-            f.write_all(sync_consumer
-                .load(Ordering::Relaxed)
-                .to_string()
-                .as_bytes()
-            ).unwrap();
-            f.write_all(&[b'\n']).unwrap();
-            i += 1;
+            let consumer_client = ConsumerClient::new(
+                self.tx.subscribe(),
+                socket,
+                addr
+            );
+
+            tokio::spawn(async move {
+                consumer_client.run().await;
+            });
+
         }
-
-        f.flush().unwrap();
     }
 
-    pub fn run(self) {
+    // fn disk_syncer(queue_size: usize, sync_receiver: Receiver<QueueMessage>, sync_consumer: Arc<AtomicUsize>) {
+    //     let mut current_page = CurrentPage::A;
+    //     let f = fs::File::create("/tmp/test_sync_v2_A").unwrap();
+    //     let mut f = BufWriter::new(f);
+    //     let mut i: usize = 0;
+
+    //     for qm in sync_receiver {
+    //         if i == queue_size {
+    //             f.flush().unwrap();
+    //             f = match current_page {
+    //                 CurrentPage::A => {
+    //                     current_page = CurrentPage::B;
+    //                     let tmp = fs::File::create("/tmp/test_sync_v2_B").unwrap();
+    //                     BufWriter::new(tmp)
+    //                 },
+    //                 CurrentPage::B => {
+    //                     current_page = CurrentPage::A;
+    //                     let tmp = fs::File::create("/tmp/test_sync_v2_A").unwrap();
+    //                     BufWriter::new(tmp)
+    //                 },
+    //             };
+    //             i = 0;
+    //         }
+
+    //         f.write_all(qm.to_string().as_bytes()).unwrap();
+    //         f.write_all(&[b'\n']).unwrap();
+    //         f.write_all(sync_consumer
+    //             .load(Ordering::Relaxed)
+    //             .to_string()
+    //             .as_bytes()
+    //         ).unwrap();
+    //         f.write_all(&[b'\n']).unwrap();
+    //         i += 1;
+    //     }
+
+    //     f.flush().unwrap();
+    // }
+
+    pub async fn run(self) {
         log::debug!("starting queue server...");
 
-        let running_clone = self.running.clone();
-        ctrlc::set_handler(move || {
-            running_clone.store(false, Ordering::Relaxed);
+        let sync_rx = self.tx.subscribe();
+        let mut stop_rx_clone = self.stop_rx.clone();
+        let self_clone  = self.clone();
+        let producer_task = tokio::spawn(async move {
+            select! {
+                _ = stop_rx_clone.changed() => {},
+                _ = self_clone.producer_client_handler() => {}
+            }
+        });
 
-            let _ = TcpStream::connect_timeout(&self.addr_producer, Duration::from_secs(2));
-            let _ = TcpStream::connect_timeout(&self.addr_consumer, Duration::from_secs(2));
-        }).unwrap();
 
-        let p_listener = TcpListener::bind(self.addr_producer).unwrap();
-        let c_listener = TcpListener::bind(self.addr_consumer).unwrap();
-        let heartbeat = Duration::from_millis(self.heartbeat);
+        let mut stop_rx_clone = self.stop_rx.clone();
+        let self_clone  = self.clone();
+        let consumer_task = tokio::spawn(async move {
+            select! {
+                _ = stop_rx_clone.changed() => {},
+                _ = self_clone.consumer_client_handler() => {}
+            }
+        });
 
-        let (sync_sender, sync_receiver) = crossbeam::channel::bounded(1000);
-        let sync_consumer = Arc::new(AtomicUsize::new(0));
-        //let (sync_sender, sync_receiver) = crossbeam::channel::bounded(self.ringbuf.capacity());
-
-        log::debug!("spawning producer handler");
-        let ringbuf_clone = self.ringbuf.clone();
-        let running_clone = self.running.clone();
-        let sync_sender_clone = sync_sender.clone();
-        let sync_consumer_clone = sync_consumer.clone();
-        let p_thread = thread::spawn(move || QueueServer::client_handler::<ProducerClient>(
-            p_listener,
-            heartbeat,
-            ringbuf_clone,
-            sync_sender_clone,
-            sync_consumer_clone,
-            running_clone
-        ));
-
-        log::debug!("spawning consumer handler");
-        let ringbuf_clone = self.ringbuf.clone();
-        let running_clone = self.running.clone();
-        let sync_sender_clone = sync_sender.clone();
-        let sync_consumer_clone = sync_consumer.clone();
-        let c_thread = thread::spawn(move || QueueServer::client_handler::<ConsumerClient>(
-            c_listener,
-            heartbeat,
-            ringbuf_clone,
-            sync_sender_clone,
-            sync_consumer_clone,
-            running_clone
-        ));
-
-        let queue_size = self.ringbuf.capacity();
-        let s_thread = thread::spawn(move || Self::disk_syncer(
-            queue_size, sync_receiver, sync_consumer)
-        );
-        drop(sync_sender);
-
-        log::info!("ready to accept connections!");
-        c_thread.join().unwrap();
-        p_thread.join().unwrap();
-        s_thread.join().unwrap();
+        log::info!("queue server ready");
+        producer_task.await.unwrap();
+        consumer_task.await.unwrap();
 
     }
 
