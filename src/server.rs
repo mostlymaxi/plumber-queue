@@ -1,9 +1,10 @@
+use std::fs::File;
 use std::net::{SocketAddr, Ipv4Addr, IpAddr};
 use tokio::net::{TcpListener, TcpStream};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use std::io;
+use std::io::{self, BufReader, BufRead};
 use crate::handlers::{ProducerClient, ConsumerClient};
 use crate::syncer::{QueueSyncer, ConsumerOffsetSyncer};
 use tokio::{signal, select};
@@ -16,7 +17,7 @@ pub struct QueueMessage {
 }
 
 #[derive(Debug)]
-pub struct QueueMessageError;
+pub struct ParseQueueMessageError;
 
 impl QueueMessage {
     pub fn new(offset: usize, msg: String) -> QueueMessage {
@@ -33,24 +34,35 @@ impl QueueMessage {
     pub fn get_offset(&self) -> usize {
         self.offset
     }
-
-    #[allow(dead_code)]
-    pub fn offset_from_str(&self, value: &str) -> Result<usize, QueueMessageError> {
-        let value = value.trim();
-        let mut value_iter = value.split(' ');
-        let mut offset = value_iter.next().ok_or(QueueMessageError)?;
-
-        offset = offset.trim_start_matches('[');
-        offset = offset.trim_end_matches(']');
-
-        usize::from_str_radix(offset, 16)
-            .map_err(|_| QueueMessageError)
-    }
 }
 
 impl ToString for QueueMessage {
     fn to_string(&self) -> String {
         format!("[{:X}] {}", self.offset, self.msg)
+    }
+}
+
+impl TryFrom<String> for QueueMessage {
+    type Error = ParseQueueMessageError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let value = value.trim();
+        let mut value_iter = value.split(' ');
+        let mut offset = value_iter.next().ok_or(ParseQueueMessageError)?;
+        let msg = value_iter.next().ok_or(ParseQueueMessageError)?;
+
+        offset = offset.trim_start_matches('[');
+        offset = offset.trim_end_matches(']');
+
+        let offset = usize::from_str_radix(offset, 16)
+            .map_err(|_| ParseQueueMessageError)?;
+
+        let msg = msg.to_string();
+
+        Ok(Self {
+            offset,
+            msg
+        })
     }
 }
 
@@ -98,6 +110,41 @@ impl QueueServer {
     pub const DEFAULT_IPV4: (u8, u8, u8, u8) = (127, 0, 0, 1);
     pub const DEFAULT_HEARTBEAT_MS: u64 = 10_000;
 
+    // nasty hack but just testing it out for now...
+    #[allow(dead_code)]
+    pub fn from_sync() -> Self {
+        let fa = BufReader::new(File::open("/tmp/qtest/qsync/producer.A").unwrap());
+        let fb = BufReader::new(File::open("/tmp/qtest/qsync/producer.B").unwrap());
+
+        let qm_a = QueueMessage::try_from(fa.lines().next().unwrap().unwrap()).unwrap();
+        let qm_b = QueueMessage::try_from(fb.lines().next().unwrap().unwrap()).unwrap();
+
+        let fa = BufReader::new(File::open("/tmp/qtest/qsync/producer.A").unwrap());
+        let fb = BufReader::new(File::open("/tmp/qtest/qsync/producer.B").unwrap());
+
+        let (first, second) = match qm_a.get_offset().cmp(&qm_b.get_offset()) {
+            std::cmp::Ordering::Less => (fa, fb),
+            std::cmp::Ordering::Greater => (fb, fa),
+            std::cmp::Ordering::Equal => unreachable!(),
+        };
+
+        let channels = QueueChannels::new(Self::DEFAULT_QUEUE_SIZE);
+
+        for f in [first, second] {
+            for msg in f.lines() {
+                let Ok(msg) = msg else { continue };
+                let Ok(msg) = msg.try_into() else { continue };
+
+                if channels.main_tx.is_full() {
+                    let _ = channels.main_rx.recv();
+                }
+                let _ = channels.main_tx.send(msg);
+            }
+        };
+
+        Self::new_with_channels(channels)
+    }
+
     #[allow(dead_code)]
     pub fn new() -> Self {
         let channels = QueueChannels::new(Self::DEFAULT_QUEUE_SIZE);
@@ -131,6 +178,35 @@ impl QueueServer {
     #[allow(dead_code)]
     pub fn new_with_size(n: usize) -> Self {
         let channels = QueueChannels::new(n);
+        let (stop_tx, stop_rx) = watch::channel(());
+
+        tokio::spawn(async move {
+            let _ = signal::ctrl_c().await;
+            let _ = stop_tx.send(());
+        });
+
+        let (a, b, c, d) = Self::DEFAULT_IPV4;
+
+        let addr_producer = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
+            Self::DEFAULT_PRODUCER_PORT);
+        let addr_consumer = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
+            Self::DEFAULT_CONSUMER_PORT);
+
+        let _heartbeat = Self::DEFAULT_HEARTBEAT_MS;
+
+        Self {
+            addr_producer,
+            addr_consumer,
+            channels,
+            stop_rx,
+            _heartbeat
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_with_channels(channels: QueueChannels) -> Self {
         let (stop_tx, stop_rx) = watch::channel(());
 
         tokio::spawn(async move {

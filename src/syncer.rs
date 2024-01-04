@@ -19,6 +19,15 @@ pub enum CurrentSyncPage {
     B
 }
 
+impl ToString for CurrentSyncPage {
+    fn to_string(&self) -> String {
+        match self {
+            CurrentSyncPage::A => "A".to_owned(),
+            CurrentSyncPage::B => "B".to_owned(),
+        }
+    }
+}
+
 pub struct QueueSyncer {
     queue_size: usize,
     sync_page: CurrentSyncPage,
@@ -94,7 +103,11 @@ impl QueueSyncer {
     }
 
     pub async fn run(&mut self) {
-        let file: File = File::create(self.path.join("producer.A")).await.unwrap();
+        let file: File = File::options().append(true).create(true).open(
+            self.path.join("producer")
+            .with_extension(self.sync_page.to_string())
+        ).await.unwrap();
+
         let mut f = BufWriter::new(file);
 
         let mut rx = self.producer_sync_rx.stream();
@@ -106,17 +119,16 @@ impl QueueSyncer {
                 _ = time::sleep(Duration::from_millis(500)) => f.flush().await.unwrap(),
                 Some(qm) = rx.next() => {
                     if i >= self.queue_size {
-                        let file_name = match self.sync_page {
-                            CurrentSyncPage::A => {
-                                self.sync_page = CurrentSyncPage::B;
-                                "producer.B"
-                            },
-                            CurrentSyncPage::B => {
-                                self.sync_page = CurrentSyncPage::A;
-                                "producer.A"
-                            },
+                        match self.sync_page {
+                            CurrentSyncPage::A => self.sync_page = CurrentSyncPage::B,
+                            CurrentSyncPage::B => self.sync_page = CurrentSyncPage::A,
                         };
-                        let file = File::create(self.path.join(file_name)).await.unwrap();
+
+                        let file = File::create(
+                            self.path.join("producer")
+                            .with_extension(self.sync_page.to_string())
+                        ).await.unwrap();
+
                         f = BufWriter::new(file);
                         i = 0;
                     }
