@@ -2,8 +2,8 @@ use clap::Parser;
 use server::QueueServer;
 
 mod handlers;
-mod syncer;
 mod server;
+mod syncer;
 
 /// the simplest queue around
 #[derive(Parser)]
@@ -27,9 +27,14 @@ struct Args {
 async fn main() {
     let args = Args::parse();
     env_logger::init_from_env(
-        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"));
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+    );
 
-    log::info!("building queue server with queue size {}...", args.queue_size);
+    log::info!(
+        "building queue server with queue size {}...",
+        args.queue_size
+    );
+
     let qs = QueueServer::new_with_size(args.queue_size)
         .with_consumer_port(args.consumer_port)
         .with_producer_port(args.producer_port);
