@@ -1,14 +1,14 @@
+use futures::StreamExt;
+use std::fs;
 use std::io::SeekFrom;
 use std::path::PathBuf;
-use futures::StreamExt;
-use tokio::io::{BufWriter, AsyncWriteExt, AsyncSeekExt};
-use tokio::fs::File;
-use tokio::sync::watch;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::fs;
-use tokio::{time, select};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::fs::File;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
+use tokio::sync::watch;
+use tokio::{select, time};
 
 use flume::Receiver;
 
@@ -16,7 +16,7 @@ use crate::server::QueueMessage;
 
 pub enum CurrentSyncPage {
     A,
-    B
+    B,
 }
 
 impl ToString for CurrentSyncPage {
@@ -33,22 +33,23 @@ pub struct QueueSyncer {
     sync_page: CurrentSyncPage,
     producer_sync_rx: Receiver<QueueMessage>,
     stop_rx: watch::Receiver<()>,
-    path: PathBuf
+    path: PathBuf,
 }
 
 pub struct ConsumerOffsetSyncer {
     queue_size: usize,
     consumer_sync_offset: Arc<AtomicUsize>,
     stop_rx: watch::Receiver<()>,
-    path: PathBuf
+    path: PathBuf,
 }
 
 impl ConsumerOffsetSyncer {
     pub fn new(
-            queue_size: usize,
-            consumer_sync_offset: Arc<AtomicUsize>,
-            stop_rx: watch::Receiver<()>,
-            path: PathBuf) -> ConsumerOffsetSyncer {
+        queue_size: usize,
+        consumer_sync_offset: Arc<AtomicUsize>,
+        stop_rx: watch::Receiver<()>,
+        path: PathBuf,
+    ) -> ConsumerOffsetSyncer {
         let path = path.join("qsync");
         fs::create_dir_all(&path).unwrap();
 
@@ -61,7 +62,9 @@ impl ConsumerOffsetSyncer {
     }
 
     pub async fn run(&mut self) {
-        let file = File::create(self.path.join("consumer.offset")).await.unwrap();
+        let file = File::create(self.path.join("consumer.offset"))
+            .await
+            .unwrap();
         let mut f = BufWriter::new(file);
 
         let padding = format!("{:X}", self.queue_size).len() + 1;
@@ -83,11 +86,11 @@ impl ConsumerOffsetSyncer {
 
 impl QueueSyncer {
     pub fn new(
-            queue_size: usize,
-            producer_sync_rx: Receiver<QueueMessage>,
-            stop_rx: watch::Receiver<()>,
-            path: PathBuf) -> Self {
-
+        queue_size: usize,
+        producer_sync_rx: Receiver<QueueMessage>,
+        stop_rx: watch::Receiver<()>,
+        path: PathBuf,
+    ) -> Self {
         let sync_page = CurrentSyncPage::A;
         let path = path.join("qsync");
         fs::create_dir_all(&path).unwrap();
@@ -97,16 +100,21 @@ impl QueueSyncer {
             sync_page,
             producer_sync_rx,
             stop_rx,
-            path
+            path,
         }
-
     }
 
     pub async fn run(&mut self) {
-        let file: File = File::options().append(true).create(true).open(
-            self.path.join("producer")
-            .with_extension(self.sync_page.to_string())
-        ).await.unwrap();
+        let file: File = File::options()
+            .append(true)
+            .create(true)
+            .open(
+                self.path
+                    .join("producer")
+                    .with_extension(self.sync_page.to_string()),
+            )
+            .await
+            .unwrap();
 
         let mut f = BufWriter::new(file);
 

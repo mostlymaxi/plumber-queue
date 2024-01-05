@@ -1,14 +1,14 @@
 use std::fs::File;
-use std::net::{SocketAddr, Ipv4Addr, IpAddr};
-use tokio::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
 
-use std::io::{self, BufReader, BufRead};
-use crate::handlers::{ProducerClient, ConsumerClient};
-use crate::syncer::{QueueSyncer, ConsumerOffsetSyncer};
-use tokio::{signal, select};
+use crate::handlers::{ConsumerClient, ProducerClient};
+use crate::syncer::{ConsumerOffsetSyncer, QueueSyncer};
+use std::io::{self, BufRead, BufReader};
 use tokio::sync::watch;
+use tokio::{select, signal};
 
 #[derive(Clone, Debug)]
 pub struct QueueMessage {
@@ -21,10 +21,7 @@ pub struct ParseQueueMessageError;
 
 impl QueueMessage {
     pub fn new(offset: usize, msg: String) -> QueueMessage {
-        QueueMessage {
-            offset,
-            msg,
-        }
+        QueueMessage { offset, msg }
     }
 
     pub fn get_msg(&self) -> String {
@@ -54,15 +51,11 @@ impl TryFrom<String> for QueueMessage {
         offset = offset.trim_start_matches('[');
         offset = offset.trim_end_matches(']');
 
-        let offset = usize::from_str_radix(offset, 16)
-            .map_err(|_| ParseQueueMessageError)?;
+        let offset = usize::from_str_radix(offset, 16).map_err(|_| ParseQueueMessageError)?;
 
         let msg = msg.to_string();
 
-        Ok(Self {
-            offset,
-            msg
-        })
+        Ok(Self { offset, msg })
     }
 }
 
@@ -72,7 +65,7 @@ pub struct QueueServer {
     addr_consumer: SocketAddr,
     channels: QueueChannels,
     stop_rx: watch::Receiver<()>,
-    _heartbeat: u64
+    _heartbeat: u64,
 }
 
 #[derive(Clone)]
@@ -140,7 +133,7 @@ impl QueueServer {
                 }
                 let _ = channels.main_tx.send(msg);
             }
-        };
+        }
 
         Self::new_with_channels(channels)
     }
@@ -159,10 +152,12 @@ impl QueueServer {
 
         let addr_producer = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-            Self::DEFAULT_PRODUCER_PORT);
+            Self::DEFAULT_PRODUCER_PORT,
+        );
         let addr_consumer = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-            Self::DEFAULT_CONSUMER_PORT);
+            Self::DEFAULT_CONSUMER_PORT,
+        );
 
         let _heartbeat = Self::DEFAULT_HEARTBEAT_MS;
 
@@ -171,7 +166,7 @@ impl QueueServer {
             addr_consumer,
             channels,
             stop_rx,
-            _heartbeat
+            _heartbeat,
         }
     }
 
@@ -189,10 +184,12 @@ impl QueueServer {
 
         let addr_producer = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-            Self::DEFAULT_PRODUCER_PORT);
+            Self::DEFAULT_PRODUCER_PORT,
+        );
         let addr_consumer = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-            Self::DEFAULT_CONSUMER_PORT);
+            Self::DEFAULT_CONSUMER_PORT,
+        );
 
         let _heartbeat = Self::DEFAULT_HEARTBEAT_MS;
 
@@ -201,7 +198,7 @@ impl QueueServer {
             addr_consumer,
             channels,
             stop_rx,
-            _heartbeat
+            _heartbeat,
         }
     }
 
@@ -218,10 +215,12 @@ impl QueueServer {
 
         let addr_producer = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-            Self::DEFAULT_PRODUCER_PORT);
+            Self::DEFAULT_PRODUCER_PORT,
+        );
         let addr_consumer = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-            Self::DEFAULT_CONSUMER_PORT);
+            Self::DEFAULT_CONSUMER_PORT,
+        );
 
         let _heartbeat = Self::DEFAULT_HEARTBEAT_MS;
 
@@ -230,7 +229,7 @@ impl QueueServer {
             addr_consumer,
             channels,
             stop_rx,
-            _heartbeat
+            _heartbeat,
         }
     }
 
@@ -245,9 +244,7 @@ impl QueueServer {
     #[allow(dead_code)]
     pub fn with_producer_port(mut self, port: u16) -> Self {
         let (a, b, c, d) = Self::DEFAULT_IPV4;
-        let addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-            port);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), port);
 
         self.addr_producer = addr;
         self
@@ -256,9 +253,7 @@ impl QueueServer {
     #[allow(dead_code)]
     pub fn with_consumer_port(mut self, port: u16) -> Self {
         let (a, b, c, d) = Self::DEFAULT_IPV4;
-        let addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-            port);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), port);
 
         self.addr_consumer = addr;
         self
@@ -283,7 +278,7 @@ impl QueueServer {
             self.channels.producer_sync_tx.clone(),
             self.channels.producer_sync_offset.clone(),
             socket,
-            addr
+            addr,
         )
     }
 
@@ -307,7 +302,6 @@ impl QueueServer {
                 producer_client.run().await;
                 log::info!("({}) disconnected", &addr);
             });
-
         }
     }
 
@@ -316,7 +310,7 @@ impl QueueServer {
             self.channels.main_rx.clone(),
             self.channels.consumer_sync_offset.clone(),
             socket,
-            addr
+            addr,
         )
     }
 
@@ -340,7 +334,6 @@ impl QueueServer {
                 consumer_client.run().await;
                 log::info!("({}) disconnected", &addr);
             });
-
         }
     }
 
@@ -348,27 +341,33 @@ impl QueueServer {
         log::debug!("starting queue server...");
 
         let mut producer_sync = QueueSyncer::new(
-            self.channels.main_tx.capacity().unwrap_or(Self::DEFAULT_QUEUE_SIZE),
+            self.channels
+                .main_tx
+                .capacity()
+                .unwrap_or(Self::DEFAULT_QUEUE_SIZE),
             self.channels.producer_sync_rx.clone(),
             self.stop_rx.clone(),
-            "/tmp/qtest".into()
+            "/tmp/qtest".into(),
         );
         let producer_sync_task = tokio::spawn(async move {
             producer_sync.run().await;
         });
 
         let mut consumer_sync = ConsumerOffsetSyncer::new(
-            self.channels.main_tx.capacity().unwrap_or(Self::DEFAULT_QUEUE_SIZE),
+            self.channels
+                .main_tx
+                .capacity()
+                .unwrap_or(Self::DEFAULT_QUEUE_SIZE),
             self.channels.consumer_sync_offset.clone(),
             self.stop_rx.clone(),
-            "/tmp/qtest".into()
+            "/tmp/qtest".into(),
         );
         let consumer_sync_task = tokio::spawn(async move {
             consumer_sync.run().await;
         });
 
         let mut stop_rx_clone = self.stop_rx.clone();
-        let self_clone  = self.clone();
+        let self_clone = self.clone();
         let producer_task = tokio::spawn(async move {
             select! {
                 _ = stop_rx_clone.changed() => {},
@@ -376,9 +375,8 @@ impl QueueServer {
             }
         });
 
-
         let mut stop_rx_clone = self.stop_rx.clone();
-        let self_clone  = self.clone();
+        let self_clone = self.clone();
         let consumer_task = tokio::spawn(async move {
             select! {
                 _ = stop_rx_clone.changed() => {},
@@ -391,7 +389,5 @@ impl QueueServer {
         consumer_task.await.unwrap();
         producer_sync_task.await.unwrap();
         consumer_sync_task.await.unwrap();
-
     }
-
 }
